@@ -1,7 +1,6 @@
 import time
 import threading
 import pandas as pd
-import yfinance as yf
 import requests
 from flask import Flask
 
@@ -27,11 +26,14 @@ def telegram_mesaj_gonder(mesaj):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        print(f"Telegram Yanıtı: {r.status_code}")
     except Exception as e:
         print(f"Telegram mesaj hatası: {e}")
 
 def rsi_hesapla(seri, periyot=14):
+    if len(seri) < periyot:
+        return pd.Series([50] * len(seri))
     delta = seri.diff()
     kazanc = delta.clip(lower=0)
     kayip = -delta.clip(upper=0)
@@ -40,37 +42,53 @@ def rsi_hesapla(seri, periyot=14):
     rs = ortalama_kazanc / (ortalama_kayip + 1e-10)
     return 100 - (100 / (1 + rs))
 
+def yahoo_veri_cek(sembol):
+    """Yahoo engellerini asmak icin Chrome tarayici maskesi kullanan fonksiyon"""
+    # Son 2 ayın verisini çekmek için zaman aralığı (Unix Timestamp)
+    bitis = int(time.time())
+    baslangic = bitis - (60 * 60 * 24 * 60) 
+    
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sembol}?period1={baslangic}&period2={bitis}&interval=1d"
+    
+    # Kendimizi Chrome tarayıcı gibi tanıtıyoruz (Kritik Ayar)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        veri_json = r.json()
+        kapanislar = veri_json['chart']['result'][0]['indicators']['quote'][0]['close']
+        # Boş değerleri temizle
+        kapanis_serisi = pd.Series(kapanislar).dropna()
+        return kapanis_serisi
+    except:
+        return None
+
 def borsa_taramasi_ve_sinyal():
+    print("Güvenli modda veri indirme baslatildi...")
     asiri_alim_listesi = []
     asiri_satim_listesi = []
     
-    try:
-        toplu_veri = yf.download(BIST_100_TICKERS, period="1mo", interval="1d", group_by='ticker', progress=False)
+    for sembol in BIST_100_TICKERS:
+        kapanis_serisi = yahoo_veri_cek(sembol)
+        if kapanis_serisi is尊 None or len(kapanis_serisi) < 15:
+            continue
+            
+        guncel_fiyat = round(kapanis_serisi.iloc[-1], 2)
+        rsi_serisi = rsi_hesapla(kapanis_serisi, 14)
+        rsi_degeri = round(rsi_serisi.iloc[-1], 2)
+        hisse_adi = sembol.replace(".IS", "")
         
-        for sembol in BIST_100_TICKERS:
-            try:
-                if sembol not in toplu_veri.columns.levels[0]:
-                    continue
-                veri = toplu_veri[sembol].dropna()
-                if len(veri) < 15:
-                    continue
-                    
-                guncel_fiyat = round(veri['Close'].iloc[-1], 2)
-                veri['RSI'] = rsi_hesapla(veri['Close'], 14)
-                rsi_degeri = round(veri['RSI'].iloc[-1], 2)
-                hisse_adi = sembol.replace(".IS", "")
-                
-                if rsi_degeri >= 70:
-                    asiri_alim_listesi.append(f"• *{hisse_adi}*: Fiyat: {guncel_fiyat} TL | RSI: {rsi_degeri} ⚠️")
-                elif rsi_degeri <= 30:
-                    asiri_satim_listesi.append(f"• *{hisse_adi}*: Fiyat: {guncel_fiyat} TL | RSI: {rsi_degeri} ✅")
-            except:
-                continue
-    except Exception as e:
-        print(f"Veri çekme hatası: {e}")
-        return "Borsa verileri çekilirken bir hata oluştu."
+        if rsi_degeri >= 70:
+            asiri_alim_listesi.append(f"• *{hisse_adi}*: {guncel_fiyat} TL | RSI: {rsi_degeri} ⚠️")
+        elif rsi_degeri <= 30:
+            asiri_satim_listesi.append(f"• *{hisse_adi}*: {guncel_fiyat} TL | RSI: {rsi_degeri} ✅")
+        
+        # Yahoo'yu şüphelendirmemek için her hisse arasında çok kısa (saliselik) mola veriyoruz
+        time.sleep(0.1)
 
-    rapor_mesaji = "📊 *BIST 100 AKILLI TARAMA RAPORU*\n"
+    rapor_mesaji = "📊 *BIST 100 AKILLI ROBOT RAPORU*\n"
     rapor_mesaji += "───────────────────\n\n"
     
     rapor_mesaji += "🟢 *AŞIRI SATIM (ALIM FIRSATI - RSI ≤ 30):*\n"
@@ -89,26 +107,23 @@ def borsa_taramasi_ve_sinyal():
     return rapor_mesaji
 
 def arka_plan_taramasi():
-    """Robotun Render açıldığında İLK MESAJI atmasını ve sonrasında her 12 saatte bir çalışmasını sağlar"""
-    print("Arka plan tarama döngüsü başladı...")
-    # Sunucu ilk açıldığında hemen bir test taraması yapıp cebe gönderir
-    time.sleep(10) 
+    print("Arka plan tarama döngüsü aktif.")
+    # Sunucu açılır açılmaz ilk mesajı göndersin
     mesaj = borsa_taramasi_ve_sinyal()
     telegram_mesaj_gonder(mesaj)
     
     while True:
-        # 12 saatte bir (43200 saniye) otomatik olarak arka planda tarama yapar
+        # Sonrasında 12 saatte bir çalışmaya devam edecek
         time.sleep(43200)
         mesaj = borsa_taramasi_ve_sinyal()
         telegram_mesaj_gonder(mesaj)
 
-# Robotun kapanmasını önlemek için arka plan döngüsünü ayrı bir iş parçacığında (thread) başlatıyoruz
+# Arka plan görevini başlat
 threading.Thread(target=arka_plan_taramasi, daemon=True).start()
 
 @app.route('/')
 def home():
-    # Render sunucusu bu sayfayı açık görerek 'Live' durumunda tutacak
-    return "<h1>BIST 100 Robotu Arka Planda Aktif Olarak Calisiyor!</h1>"
+    return "<h1>BIST 100 Robotu Guvenli Modda Calisiyor!</h1>"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
