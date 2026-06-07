@@ -1,4 +1,5 @@
 import time
+import threading
 import pandas as pd
 import yfinance as yf
 import requests
@@ -6,11 +7,9 @@ from flask import Flask
 
 app = Flask(__name__)
 
-# Telegram Bilgilerin (Sistem bunları kullanarak sana mesaj atacak)
 BOT_TOKEN = "8942579926:AAEXPwqqxeo5kXozOSjc83OsrxONkMN5iz8"
 CHAT_ID = "8686065642"
 
-# BIST 100 Hisselerinin Tam Listesi
 BIST_100_TICKERS = [
     "AEFES.IS", "AGHOL.IS", "AGROT.IS", "AHGAZ.IS", "AKBNK.IS", "AKCNS.IS", "AKFYE.IS", "AKSA.IS", "AKSEN.IS", "ALARK.IS",
     "ALBRK.IS", "ALFAS.IS", "ANACM.IS", "ARCLK.IS", "ASELS.IS", "ASTOR.IS", "BERA.IS", "BEXIM.IS", "BIENY.IS", "BIMAS.IS",
@@ -25,7 +24,6 @@ BIST_100_TICKERS = [
 ]
 
 def telegram_mesaj_gonder(mesaj):
-    """Robotun senin telefonuna mesaj atmasını sağlayan fonksiyon"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "Markdown"}
     try:
@@ -43,6 +41,74 @@ def rsi_hesapla(seri, periyot=14):
     return 100 - (100 / (1 + rs))
 
 def borsa_taramasi_ve_sinyal():
-    print("BIST 100 Taraması başlatılıyor...")
-    
     asiri_alim_listesi = []
+    asiri_satim_listesi = []
+    
+    try:
+        toplu_veri = yf.download(BIST_100_TICKERS, period="1mo", interval="1d", group_by='ticker', progress=False)
+        
+        for sembol in BIST_100_TICKERS:
+            try:
+                if sembol not in toplu_veri.columns.levels[0]:
+                    continue
+                veri = toplu_veri[sembol].dropna()
+                if len(veri) < 15:
+                    continue
+                    
+                guncel_fiyat = round(veri['Close'].iloc[-1], 2)
+                veri['RSI'] = rsi_hesapla(veri['Close'], 14)
+                rsi_degeri = round(veri['RSI'].iloc[-1], 2)
+                hisse_adi = sembol.replace(".IS", "")
+                
+                if rsi_degeri >= 70:
+                    asiri_alim_listesi.append(f"• *{hisse_adi}*: Fiyat: {guncel_fiyat} TL | RSI: {rsi_degeri} ⚠️")
+                elif rsi_degeri <= 30:
+                    asiri_satim_listesi.append(f"• *{hisse_adi}*: Fiyat: {guncel_fiyat} TL | RSI: {rsi_degeri} ✅")
+            except:
+                continue
+    except Exception as e:
+        print(f"Veri çekme hatası: {e}")
+        return "Borsa verileri çekilirken bir hata oluştu."
+
+    rapor_mesaji = "📊 *BIST 100 AKILLI TARAMA RAPORU*\n"
+    rapor_mesaji += "───────────────────\n\n"
+    
+    rapor_mesaji += "🟢 *AŞIRI SATIM (ALIM FIRSATI - RSI ≤ 30):*\n"
+    if asiri_satim_listesi:
+        rapor_mesaji += "\n".join(asiri_satim_listesi) + "\n\n"
+    else:
+        rapor_mesaji += "Şu an bu kritere uyan hisse bulunamadı.\n\n"
+        
+    rapor_mesaji += "🔴 *AŞIRI ALIM (DİKKATLİ OLUN - RSI ≥ 70):*\n"
+    if asiri_alim_listesi:
+        rapor_mesaji += "\n".join(asiri_alim_listesi) + "\n"
+    else:
+        rapor_mesaji += "Şu an bu kritere uyan hisse bulunamadı.\n"
+        
+    rapor_mesaji += "\n🤖 _Robot taramayı başarıyla tamamladı._"
+    return rapor_mesaji
+
+def arka_plan_taramasi():
+    """Robotun Render açıldığında İLK MESAJI atmasını ve sonrasında her 12 saatte bir çalışmasını sağlar"""
+    print("Arka plan tarama döngüsü başladı...")
+    # Sunucu ilk açıldığında hemen bir test taraması yapıp cebe gönderir
+    time.sleep(10) 
+    mesaj = borsa_taramasi_ve_sinyal()
+    telegram_mesaj_gonder(mesaj)
+    
+    while True:
+        # 12 saatte bir (43200 saniye) otomatik olarak arka planda tarama yapar
+        time.sleep(43200)
+        mesaj = borsa_taramasi_ve_sinyal()
+        telegram_mesaj_gonder(mesaj)
+
+# Robotun kapanmasını önlemek için arka plan döngüsünü ayrı bir iş parçacığında (thread) başlatıyoruz
+threading.Thread(target=arka_plan_taramasi, daemon=True).start()
+
+@app.route('/')
+def home():
+    # Render sunucusu bu sayfayı açık görerek 'Live' durumunda tutacak
+    return "<h1>BIST 100 Robotu Arka Planda Aktif Olarak Calisiyor!</h1>"
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
