@@ -1,120 +1,158 @@
-import time
-import threading
+import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-from flask import Flask
+import plotly.graph_objects as go
+from ta.momentum import RSIIndicator
+from ta.trend import SMAIndicator
 
-app = Flask(__name__)
+# Sayfa Genişlik Ayarı
+st.set_page_config(page_title="BIST 100 Algoritmik Analiz", layout="wide")
 
-BOT_TOKEN = "8942579926:AAEXPwqqxeo5kXozOSjc83OsrxONkMN5iz8"
-CHAT_ID = "8686065642"
+st.title("🤖 BIST 100 Saatlik Sinyal & Backtest (Geçmiş Testi) Robotu")
+st.markdown("Bu program, seçtiğiniz hissenin **saatlik verilerini** inceler, indikatör stratejisine göre geçmişte ne kadar kazandıracağını hesaplar ve anlık öneri sunar.")
+
+# Yan Menü Ayarları
+st.sidebar.header("⚙️ Strateji ve Zaman Ayarları")
 
 BIST_100_TICKERS = [
-    "AEFES.IS", "AGHOL.IS", "AGROT.IS", "AHGAZ.IS", "AKBNK.IS", "AKCNS.IS", "AKFYE.IS", "AKSA.IS", "AKSEN.IS", "ALARK.IS",
-    "ALBRK.IS", "ALFAS.IS", "ANACM.IS", "ARCLK.IS", "ASELS.IS", "ASTOR.IS", "BERA.IS", "BEXIM.IS", "BIENY.IS", "BIMAS.IS",
-    "BIOEN.IS", "BOBET.IS", "BRSAN.IS", "BRYAT.IS", "BUCIM.IS", "CCOLA.IS", "CATES.IS", "CIMSA.IS", "CWENE.IS", "DOAS.IS",
-    "DOHOL.IS", "ECILC.IS", "EUPWR.IS", "ECZYT.IS", "EGEEN.IS", "EKGYO.IS", "ENJSA.IS", "ENKAI.IS", "EREGL.IS", "FROTO.IS",
-    "GARAN.IS", "GESAN.IS", "GUBRF.IS", "GWIND.IS", "HALKB.IS", "HEKTS.IS", "INVEO.IS", "IPEKE.IS", "ISCTR.IS", "ISGYO.IS",
-    "ISMEN.IS", "IZMDC.IS", "KARDMD.IS", "KAYSE.IS", "KCAER.IS", "KCHOL.IS", "KLSER.IS", "KONTR.IS", "KORDS.IS", "KOZAA.IS",
-    "KOZAL.IS", "KRDMD.IS", "MAVI.IS", "MHRGY.IS", "MIATK.IS", "MGROS.IS", "ODAS.IS", "OTKAR.IS", "OYAKC.IS", "PETKM.IS",
-    "PGSUS.IS", "QUAGR.IS", "SAHOL.IS", "SASA.IS", "SAYAS.IS", "SISE.IS", "SKBNK.IS", "SMRTG.IS", "SOKM.IS", "TABGD.IS",
-    "TARKM.IS", "TAVHL.IS", "TCELL.IS", "THYAO.IS", "TKFEN.IS", "TOASO.IS", "TSKB.IS", "TTKOM.IS", "TTRAK.IS", "TUKAS.IS",
-    "TUPRS.IS", "TURSG.IS", "ULKER.IS", "VAKBN.IS", "VESBE.IS", "VESTL.IS", "YEOTK.IS", "YKBNK.IS", "YYLGD.IS", "ZOREN.IS"
+    "THYAO.IS", "TUPRS.IS", "EREGL.IS", "ASELS.IS", "AKBNK.IS", "BIMAS.IS", "KCHOL.IS", "SAHOL.IS", "ISCTR.IS", "SASA.IS",
+    "AGROT.IS", "ASTOR.IS", "FROTO.IS", "GARAN.IS", "KONTR.IS", "KOZAL.IS", "MGROS.IS", "PETKM.IS", "PGSUS.IS", "SISE.IS"
 ]
 
-def telegram_mesaj_gonder(mesaj):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": mesaj, "parse_mode": "Markdown"}
-    try:
-        r = requests.post(url, json=payload)
-        print(f"Telegram Yanit_Kodu: {r.status_code}")
-    except Exception as e:
-        print(f"Telegram mesaj hatasi: {e}")
+secilen_hisse = st.sidebar.selectbox("Hisse Seçin:", BIST_100_TICKERS)
 
-def rsi_hesapla(seri, periyot=14):
-    if len(seri) < periyot:
-        return pd.Series([50] * len(seri))
-    delta = seri.diff()
-    kazanc = delta.clip(lower=0)
-    kayip = -delta.clip(upper=0)
-    ortalama_kazanc = kazanc.ewm(com=periyot - 1, adjust=False).mean()
-    ortalama_kayip = kayip.ewm(com=periyot - 1, adjust=False).mean()
-    rs = ortalama_kazanc / (ortalama_kayip + 1e-10)
-    return 100 - (100 / (1 + rs))
+# Saatlik veride Yahoo Finance en fazla geçmiş 2 ayı (60 gün) destekler
+st.sidebar.info("💡 Saatlik (1h) analizlerde Yahoo Finance kuralı gereği son 60 günlük geçmiş test edilir.")
 
-def yahoo_veri_cek(sembol):
-    bitis = int(time.time())
-    baslangic = bitis - (60 * 60 * 24 * 60) 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sembol}?period1={baslangic}&period2={bitis}&interval=1d"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        veri_json = r.json()
-        kapanislar = veri_json['chart']['result'][0]['indicators']['quote'][0]['close']
-        kapanis_serisi = pd.Series(kapanislar).dropna()
-        return kapanis_serisi
-    except:
-        return None
+# İndikatör Sınır Ayarları (Kullanıcı değiştirebilsin)
+st.sidebar.subheader("🎯 RSI Strateji Sınırları")
+rsi_alt_sinir = st.sidebar.slider("AL Sinyali İçin RSI Alt Sınır (Aşırı Satım)", 15, 40, 30)
+rsi_ust_sinir = st.sidebar.slider("SAT Sinyali İçin RSI Üst Sınır (Aşırı Alım)", 60, 85, 70)
 
-def borsa_taramasi_ve_sinyal():
-    print("Guvenli modda BIST 100 taramasi basladi...")
-    asiri_alim_listesi = []
-    asiri_satim_listesi = []
+# Veri Çekme (Saatlik periyotta)
+@st.cache_data
+def saatlik_veri_indir(sembol):
+    # period="2mo", interval="1h" -> Son 2 ayın saatlik verileri
+    veri = yf.download(sembol, period="2mo", interval="1h")
+    if isinstance(veri.columns, pd.MultiIndex):
+        veri.columns = veri.columns.get_level_values(0)
+    return veri
+
+veri = saatlik_veri_indir(secilen_hisse)
+
+if not veri.empty and len(veri) > 15:
+    # 1. İndikatörleri Hesapla
+    veri['RSI'] = RSIIndicator(close=veri['Close'], window=14).rsi()
+    veri['SMA20'] = SMAIndicator(close=veri['Close'], window=20).sma_indicator()
     
-    for sembol in BIST_100_TICKERS:
-        kapanis_serisi = yahoo_veri_cek(sembol)
-        if kapanis_serisi is None or len(kapanis_serisi) < 15:
-            continue
+    # Hafta sonu boşluklarını temizle
+    veri = veri.dropna()
+
+    # 2. BACKTEST (GEÇMİŞE DÖNÜK SİMÜLASYON) MOTORU
+    # Strateji: RSI <= rsi_alt_sinir ise AL, RSI >= rsi_ust_sinir ise SAT
+    pozisyon = 0  # 0: Nakit, 1: Hissede
+    al_fiyatlari = []
+    sat_fiyatlari = []
+    sinyaller = [] # Görsel grafikte göstermek için
+    
+    # Al-Sat geçmişini tutacak liste
+    islem_gecmisi = []
+    
+    for i in range(len(veri)):
+        guncel_rsi = veri['RSI'].iloc[i]
+        guncel_fiyat = veri['Close'].iloc[i]
+        tarih = veri.index[i]
+        
+        # AL KOŞULU
+        if guncel_rsi <= rsi_alt_sinir and pozisyon == 0:
+            pozisyon = 1
+            al_fiyatlari.append(guncel_fiyat)
+            sinyaller.append("AL")
+            islem_gecmisi.append({"Tarih/Saat": tarih, "İşlem": "🟢 AL (RSI Dip)", "Fiyat (TL)": round(guncel_fiyat, 2)})
+        # SAT KOŞULU
+        elif guncel_rsi >= rsi_ust_sinir and pozisyon == 1:
+            pozisyon = 0
+            sat_fiyatlari.append(guncel_fiyat)
+            sinyaller.append("SAT")
+            islem_gecmisi.append({"Tarih/Saat": tarih, "İşlem": "🔴 SAT (RSI Zirve)", "Fiyat (TL)": round(guncel_fiyat, 2)})
+        else:
+            sinyaller.append("BEKLE")
             
-        guncel_fiyat = round(kapanis_serisi.iloc[-1], 2)
-        rsi_serisi = rsi_hesapla(kapanis_serisi, 14)
-        rsi_degeri = round(rsi_serisi.iloc[-1], 2)
-        hisse_adi = sembol.replace(".IS", "")
+    # Toplam kârlılık hesabı
+    strateji_kari = 0
+    minimum_islem = min(len(al_fiyatlari), len(sat_fiyatlari))
+    for k in range(minimum_islem):
+        kar_orani = ((sat_fiyatlari[k] - al_fiyatlari[k]) / al_fiyatlari[k]) * 100
+        strateji_kari += kar_orani
         
-        if rsi_degeri >= 70:
-            asiri_alim_listesi.append(f"• *{hisse_adi}*: {guncel_fiyat} TL | RSI: {rsi_degeri} ⚠️")
-        elif rsi_degeri <= 30:
-            asiri_satim_listesi.append(f"• *{hisse_adi}*: {guncel_fiyat} TL | RSI: {rsi_degeri} ✅")
-        
-        time.sleep(0.1)
+    # Basitçe hisseyi alıp bekleseydik ne olurdu? (Buy & Hold)
+    hisse_normal_getiri = ((veri['Close'].iloc[-1] - veri['Close'].iloc[0]) / veri['Close'].iloc[0]) * 100
 
-    rapor_mesaji = "📊 *BIST 100 HESAPLANAN EN SON SİNYALLER*\n"
-    rapor_mesaji += "───────────────────\n\n"
+    # 3. ANNLIK DURUM VE ÖNERİ (En son muma bakarak)
+    son_rsi = round(veri['RSI'].iloc[-1], 2)
+    son_fiyat = round(veri['Close'].iloc[-1], 2)
     
-    rapor_mesaji += "🟢 *AŞIRI SATIM (ALIM FIRSATI - RSI ≤ 30):*\n"
-    if asiri_satim_listesi:
-        rapor_mesaji += "\n".join(asiri_satim_listesi) + "\n\n"
+    if son_rsi <= rsi_alt_sinir:
+        oneri = "🟢 KUVVETLİ AL (Hisse Aşırı Ucuzladı)"
+        oneri_renk = "green"
+    elif son_rsi >= rsi_ust_sinir:
+        oneri = "🔴 KUVVETLİ SAT (Hisse Şişti / Kâr Al)"
+        oneri_renk = "red"
     else:
-        rapor_mesaji += "Su an bu kritere uyan hisse bulunamadi.\n\n"
-        
-    rapor_mesaji += "🔴 *AŞIRI ALIM (DİKKATLİ OLUN - RSI ≥ 70):*\n"
-    if asiri_alim_listesi:
-        rapor_mesaji += "\n".join(asiri_alim_listesi) + "\n"
-    else:
-        rapor_mesaji += "Su an bu kritere uyan hisse bulunamadi.\n"
-        
-    rapor_mesaji += "\n🤖 _Robot taramayi basariyla tamamladi._"
-    return rapor_mesaji
+        oneri = "🟡 BEKLE / NÖTR (Yeni Sinyal Bekleniyor)"
+        oneri_renk = "blue"
 
-def arka_plan_taramasi():
-    print("Arka plan tarama dongusu aktif hale geldi.")
-    # Sunucu acilir acilmaz ilk mesajı gonderir
-    mesaj = borsa_taramasi_ve_sinyal()
-    telegram_mesaj_gonder(mesaj)
+    # 4. EKRANA BASMA ALANI
+    # Öneri Paneli
+    st.markdown(f"### 🎯 Saatlik Güncel Sinyal Önerisi")
+    st.info(f"**{secilen_hisse.replace('.IS','')}** için şu anki saatlik durum: **{oneri}** (Anlık Fiyat: {son_fiyat} TL | Güncel RSI: {son_rsi})")
+
+    st.markdown("---")
+
+    # Backtest Sonuç Kartları
+    st.subheader("📊 Son 2 Aylık Geçmişe Dönük Performans Raporu")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Robotun Toplam Getirisi (% Periyot)", f"{round(strateji_kari, 2)}%", help="Robotun Al-Sat sinyallerine uysaydınız elde edeceğiniz toplam kâr")
+    c2.metric("Hissede Bekleme Getirisi (Al-Unut)", f"{round(hisse_normal_getiri, 2)}%", help="Hisseyi 2 ay önce alıp hiç satmasaydınız ne kazanırdınız?")
+    c3.metric("Toplam Yapılan Sinyal İşlemi", f"{minimum_islem * 2} Adet (Al+Sat)")
+
+    st.markdown("---")
+
+    # 5. GRAFİK ALANI (Gelişmiş Mum Grafik + Sinyal Noktaları)
+    st.subheader("📈 Saatlik Grafik Üzerinde Al/Sat Noktaları")
+    fig = go.Figure()
+
+    # Mum Grafik (Candlestick)
+    fig.add_trace(go.Candlestick(
+        x=veri.index, open=veri['Open'], high=veri['High'], low=veri['Low'], close=veri['Close'],
+        name="Saatlik Mumlar"
+    ))
+
+    # Grafiğe AL/SAT sinyal ikonlarını ekleme
+    veri['Sinyal'] = sinyaller
+    al_noktalari = veri[veri['Sinyal'] == "AL"]
+    sat_noktalari = veri[veri['Sinyal'] == "SAT"]
+
+    fig.add_trace(go.Scatter(
+        x=al_noktalari.index, y=al_noktalari['Close'] * 0.98,
+        mode='markers', marker=dict(color='lightgreen', size=12, symbol='triangle-up'), name='Robot AL Noktası'
+    ))
     
-    while True:
-        # 12 saatte bir calisacak
-        time.sleep(43200)
-        mesaj = borsa_taramasi_ve_sinyal()
-        telegram_mesaj_gonder(mesaj)
+    fig.add_trace(go.Scatter(
+        x=sat_noktalari.index, y=sat_noktalari['Close'] * 1.02,
+        mode='markers', marker=dict(color='red', size=12, symbol='triangle-down'), name='Robot SAT Noktası'
+    ))
 
-threading.Thread(target=arka_plan_taramasi, daemon=True).start()
+    fig.update_layout(template="plotly_dark", xaxis_rangeslider_visible=False, height=500)
+    st.plotly_chart(fig, use_container_width=True)
 
-@app.route('/')
-def home():
-    return "<h1>BIST 100 Robotu Arka Planda Hatasiz Calisiyor!</h1>"
+    # 6. İŞLEM DETAY TABLOSU
+    st.subheader("📋 Robotun Geçmişte Yaptığı Al-Sat İşlemlerinin Listesi")
+    if islem_gecmisi:
+        df_gecmis = pd.DataFrame(islem_gecmisi)
+        st.dataframe(df_gecmis, use_container_width=True)
+    else:
+        st.write("Belirttiğiniz RSI sınırlarına son 2 ayda saatlik periyotta uyan geçmiş işlem bulunamadı. Yan menüden sınırları gevşetebilirsiniz (Örn: 35-65).")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+else:
+    st.error("Veri alınamadı veya seans dışı saatlik veri bulunmuyor.")
